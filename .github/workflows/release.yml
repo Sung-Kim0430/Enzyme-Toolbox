@@ -1,0 +1,269 @@
+name: Release
+
+# 触发条件：推送 v* 标签时自动发布，手动触发可重跑
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（留空则使用当前 HEAD 关联的 tag）'
+        required: false
+        type: string
+
+# 同一 tag 发布只跑一次
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 用于创建 Release
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. 预构建 preload.so
+  # ---------------------------------------------------------------
+  build-preload:
+    name: Build preload.so (Android NDK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout T5M-305-Preload
+        uses: actions/checkout@v4
+        with:
+          repository: Enzymeym/T5M-305-Preload
+          path: t5m-preload
+          fetch-depth: 1
+
+      - name: Install Android NDK r29
+        uses: nttld/android-ndk-action@v1
+        with:
+          ndk-version: r29
+
+      - name: Build preload.so
+        working-directory: t5m-preload/source
+        run: make preload
+
+      - name: Upload preload.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: preload-so
+          path: t5m-preload/source/build/bin/preload.so
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------
+  # 2. 平台构建矩阵（与 build.yml 保持一致）
+  # ---------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.label }}
+    needs: build-preload
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - label: Linux x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - label: macOS x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+          - label: macOS aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            file
+
+      - name: Download preload.so
+        uses: actions/download-artifact@v4
+        with:
+          name: preload-so
+          path: src/assets/preload
+        # name=preload-so 已经是文件名，需要改成项目期望的名字
+      - name: Rename preload.so
+        shell: bash
+        run: |
+          mkdir -p src/assets/preload
+          if [ -f src/assets/preload/preload.so ]; then
+            mv src/assets/preload/preload.so \
+               src/assets/preload/enzymeym-t5m305-preload-dev.so
+          fi
+          ls -lh src/assets/preload/
+
+      - name: Install pnpm dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check & build frontend
+        run: pnpm build
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      - name: Stage bundle artifacts (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p out
+          find src-tauri/target/release -maxdepth 6 \
+            \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \
+               -o -name '*.app' -o -name '*.tar.gz' \) \
+            -type f -exec cp -r {} out/ \;
+          # 也复制未打包的裸二进制
+          [ -f src-tauri/target/release/t5m-unlock-tool ] && \
+            cp src-tauri/target/release/t5m-unlock-tool out/
+          ls -la out/
+
+      - name: Stage bundle artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Get-ChildItem -Path src-tauri/target/release -Recurse -Include '*.exe','*.msi' `
+            | Where-Object { -not $_.PSIsContainer } `
+            | Copy-Item -Destination out/ -Force
+          Get-ChildItem -Path out
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------
+  # 3. 生成校验和并发布到 GitHub Release
+  # ---------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts & compute SHA-256
+        run: |
+          mkdir -p release
+          # 把所有 artifact 里的文件平铺到 release/
+          for d in artifacts/*/; do
+            if [ -d "$d" ]; then
+              find "$d" -type f -exec cp {} release/ \;
+            fi
+          done
+          echo "=== Release artifacts ==="
+          ls -lh release/
+          echo ""
+          echo "=== SHA-256 checksums ==="
+          cd release
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Parse version from tag
+        id: version
+        run: |
+          # 自动从 tag 派生版本号（去掉前导 v）
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VER (tag: $TAG)"
+
+      - name: Generate release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cat > release-notes.md <<EOF
+          # Enzyme Toolbox v${VERSION}
+
+          ## 平台产物
+
+          | 平台 | 架构 | 包含文件 |
+          |------|------|---------|
+          | Windows | x86_64 | NSIS 安装包、可便携 exe |
+          | Linux | x86_64 | .deb、AppImage |
+          | macOS | x86_64 | .app、.dmg |
+          | macOS | aarch64 (Apple Silicon) | .app、.dmg |
+
+          ## 校验
+
+          所有产物的 SHA-256 校验和见 \`SHA256SUMS\` 文件。
+
+          ## 使用说明
+
+          - **Windows**: 双击 NSIS 安装包进行安装；或使用便携版直接运行
+          - **Linux**: \`sudo dpkg -i *.deb\` 安装 deb；或直接赋予 AppImage 执行权限并运行
+          - **macOS**: 首次启动请在「系统设置 → 隐私与安全性」中允许（未签名）。
+
+          完整文档请见 [README](https://github.com/${{ github.repository }}#readme)。
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Enzyme Toolbox v${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release/*
+          # 如果已存在同名 Release 则追加资产
+          overwrite_files: true

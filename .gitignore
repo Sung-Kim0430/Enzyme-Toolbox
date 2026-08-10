@@ -28,4 +28,14 @@ dist-ssr
 /src-tauri/gen/
 
 # 提权预加载库（敏感二进制，不入库）
+# 注意：本地构建时需要把 enzymeym-t5m305-preload-dev.so 放回该目录
 /src/assets/preload/
+
+# CI：构建过程中从 T5M-305-Preload 仓库克隆的临时目录
+/build-tmp/
+/.clones/
+
+# 校验和文件
+*.sha256
+*.sha512
+SHA256SUMS
