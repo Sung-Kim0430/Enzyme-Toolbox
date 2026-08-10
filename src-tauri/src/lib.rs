@@ -294,15 +294,36 @@ fn find_su_path(adb: &PathBuf, serial: &str) -> Option<String> {
 }
 
 /// 轮询等待 su 可执行文件出现（子进程可能在 adb shell 被 kill 后继续运行）
+/// 注入可能导致 adbd 崩溃重启，遇到 device/unauthorized 类错误时也继续等待
 fn wait_for_su_path(adb: &PathBuf, serial: &str, max_secs: u64) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(max_secs);
     while Instant::now() < deadline {
-        if let Some(path) = find_su_path(adb, serial) {
-            return Some(path);
+        match find_su_path(adb, serial) {
+            Some(path) => return Some(path),
+            None => {
+                // 先检查 adb 是否还能连上设备；连不上说明 adbd 在重启，继续等
+                let mut ping = adb_cmd(adb, serial);
+                ping.args(["shell", "echo ping"]);
+                if let Ok((true, out)) = run_command(&mut ping) {
+                    if out.trim() == "ping" {
+                        // 设备在线但还没有 su，继续轮询
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
     None
+}
+
+/// 判断 adb 输出是否为设备连接类错误
+fn is_device_connection_error(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("device not found")
+        || t.contains("device unauthorized")
+        || t.contains("no devices/emulators found")
+        || t.contains("error: device")
+        || t.contains("adb: device")
 }
 
 /// 构造带 -s 参数的 adb 命令
@@ -473,17 +494,42 @@ async fn escalate_privileges(
         // 注入超时后，设备端子进程可能仍在后台完成提权，轮询等待最多 30 秒
         let su_path = wait_for_su_path(&adb, &serial, 30)
             .unwrap_or_else(|| "/data/local/tmp/su".to_string());
-        let mut verify = adb_cmd(&adb, &serial);
-        verify.args(["shell", &format!("{} -c 'id'", su_path)]);
-        let (ok, out) = run_command(&mut verify)?;
-        let success = ok && out.contains("uid=0(root)");
+
+        // 注入可能导致 adbd 崩溃重启，验证命令带重试
+        let mut verify_ok = false;
+        let mut verify_out = String::new();
+        for attempt in 1..=10 {
+            let mut verify = adb_cmd(&adb, &serial);
+            verify.args(["shell", &format!("{} -c 'id'", su_path)]);
+            match run_command(&mut verify) {
+                Ok((ok, out)) => {
+                    if is_device_connection_error(&out) {
+                        verify_out = format!("尝试 {}: adb 连接异常，等待重试: {}", attempt, out);
+                    } else {
+                        verify_ok = ok && out.contains("uid=0(root)");
+                        verify_out = out;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if is_device_connection_error(&e) {
+                        verify_out = format!("尝试 {}: adb 连接异常，等待重试: {}", attempt, e);
+                    } else {
+                        verify_ok = false;
+                        verify_out = e;
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
         steps.push(EscalationStep {
             name: "验证 su".to_string(),
-            ok: success,
-            output: out,
+            ok: verify_ok,
+            output: verify_out,
         });
 
-        Ok(EscalationResult { success, steps })
+        Ok(EscalationResult { success: verify_ok, steps })
     })
     .await
     .map_err(|e| format!("提权任务异常: {}", e))?
