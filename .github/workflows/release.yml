@@ -85,9 +85,8 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - label: Linux ARM64
-            runner: ubuntu-24.04
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            cross: true
           - label: macOS x86_64
             runner: macos-13
             target: x86_64-apple-darwin
@@ -120,8 +119,8 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Install Linux build deps (native x86_64)
-        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -131,21 +130,6 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             file
-
-      - name: Install Linux ARM64 cross-compile deps
-        if: runner.os == 'Linux' && matrix.cross
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            libwebkit2gtk-4.1-dev:arm64 \
-            libgtk-3-dev:arm64 \
-            librsvg2-dev:arm64 \
-            file
-          sudo apt-get install -y libayatana-appindicator3-dev:arm64 || \
-            echo "Warning: libayatana-appindicator3-dev:arm64 not available, continuing without it"
 
       - name: Download preload.so
         uses: actions/download-artifact@v4.1.8 # sha: fa0a91b85d4f404e444e00e005971372dc801d16
@@ -169,39 +153,35 @@ jobs:
       - name: Type-check & build frontend
         run: pnpm build
 
-      - name: Build Tauri app (native)
-        if: "! matrix.cross"
+      - name: Build Tauri app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build --target ${{ matrix.target }}
-
-      - name: Build Tauri app (cross-compile Linux ARM64)
-        if: matrix.cross
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
         run: pnpm tauri build --target ${{ matrix.target }}
 
       - name: Stage bundle artifacts
+        shell: bash
         env:
-          RUNNER_OS: ${{ runner.os }}
+          TARGET: ${{ matrix.target }}
         run: |
           mkdir -p out
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            find src-tauri/target/release -maxdepth 6 \( -name '*.exe' -o -name '*.msi' \) -type f -exec cp {} out/ \;
+          BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
+          BIN_DIR="src-tauri/target/${TARGET}/release"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            find "$BUNDLE_DIR" -maxdepth 6 \( -name '*.exe' -o -name '*.msi' \) -type f -exec cp {} out/ \;
+            [ -f "${BIN_DIR}/t5m-unlock-tool.exe" ] && cp "${BIN_DIR}/t5m-unlock-tool.exe" out/
           else
-            find src-tauri/target/release -maxdepth 6 \
-              \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \
-                 -o -name '*.app' -o -name '*.tar.gz' \) \
-              -type f -exec cp -r {} out/ \;
-            [ -f src-tauri/target/release/t5m-unlock-tool ] && \
-              cp src-tauri/target/release/t5m-unlock-tool out/
+            find "$BUNDLE_DIR" -maxdepth 6 \
+              \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.tar.gz' \) \
+              -type f -exec cp {} out/ \;
+            find "$BUNDLE_DIR" -maxdepth 6 -type d -name '*.app' | while read -r app; do
+              base=$(basename "$app")
+              tar -czf "out/${base}.tar.gz" -C "$(dirname "$app")" "$base"
+            done
+            if [ -f "${BIN_DIR}/t5m-unlock-tool" ]; then
+              cp "${BIN_DIR}/t5m-unlock-tool" out/
+            fi
           fi
           ls -la out/
 
