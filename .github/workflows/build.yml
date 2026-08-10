@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout T5M-305-Preload
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@v4.2.2 # sha: 11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: Enzymeym/T5M-305-Preload
           ref: 3684f21930cba9a31c0254434059fcad35d9321c  # T5M-305-Preload main @ 2026-08-10
@@ -41,7 +41,7 @@ jobs:
 
       - name: Install Android NDK
         id: ndk
-        uses: nttld/setup-ndk@aacaf74664d0f8e1b070a865acb47ee25007386d # v1.6.0
+        uses: nttld/setup-ndk@v1.6.0 # sha: aacaf74664d0f8e1b070a865acb47ee25007386d
         with:
           ndk-version: r29
           add-to-path: false
@@ -60,7 +60,7 @@ jobs:
           echo "preload.so sha256: $HASH"
 
       - name: Upload preload.so
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.4.0
+        uses: actions/upload-artifact@v4.4.3 # sha: b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
           name: preload-so
           path: t5m-preload/source/build/bin/preload.so
@@ -94,26 +94,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@v4.2.2 # sha: 11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Install pnpm
-        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
+        uses: pnpm/action-setup@v4.0.0 # sha: 0c17529a66aca453f9227af23103ed11469b1e47
         with:
           version: 9
 
       - name: Set up Node.js
-        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.1.0
+        uses: actions/setup-node@v4.1.0 # sha: 39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with:
           node-version: 20
           cache: pnpm
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@4f7d682145cef06ddee61ce5d3f6901bb4949e08 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@9d47cda7f6214e8bc9b0ea7de39b8fc9a9c0344b # v2.7.0
+        uses: Swatinem/rust-cache@v2.7.5 # sha: 5cb072d7354962be830356aa6b146f7612846014
         with:
           workspaces: src-tauri -> target
 
@@ -132,7 +132,7 @@ jobs:
 
       # ---- 准备 preload.so ----
       - name: Download preload.so
-        uses: actions/download-artifact@fa0a91b85d4f404e444e775e5d8a6088c91a4421 # v4.1.8
+        uses: actions/download-artifact@v4.1.8 # sha: fa0a91b85d4f404e444e00e005971372dc801d16
         with:
           name: preload-so
           path: src/assets/preload
@@ -177,7 +177,7 @@ jobs:
           ls -la out/
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.4.0
+        uses: actions/upload-artifact@v4.4.3 # sha: b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
           name: build-${{ matrix.target }}
           path: out/
