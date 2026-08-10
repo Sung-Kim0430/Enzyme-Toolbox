@@ -226,7 +226,7 @@ fn run_command(cmd: &mut Command) -> Result<(bool, String), String> {
 
 /// 带超时执行命令（超时则 kill），用于可能挂起的注入命令
 fn run_with_timeout(cmd: &mut Command, secs: u64) -> Result<(bool, String), String> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 adb 失败 ({}): {}", cmd.get_program().to_string_lossy(), e))?;
@@ -239,7 +239,12 @@ fn run_with_timeout(cmd: &mut Command, secs: u64) -> Result<(bool, String), Stri
                 if let Some(mut s) = child.stdout.take() {
                     let _ = s.read_to_string(&mut out);
                 }
-                return Ok((status.success(), out.trim().to_string()));
+                let mut err = String::new();
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut err);
+                }
+                let text = if out.trim().is_empty() { err } else { out };
+                return Ok((status.success(), text.trim().to_string()));
             }
             None => {
                 if start.elapsed() >= Duration::from_secs(secs) {
@@ -248,13 +253,37 @@ fn run_with_timeout(cmd: &mut Command, secs: u64) -> Result<(bool, String), Stri
                     if let Some(mut s) = child.stdout.take() {
                         let _ = s.read_to_string(&mut out);
                     }
+                    let mut err = String::new();
+                    if let Some(mut s) = child.stderr.take() {
+                        let _ = s.read_to_string(&mut err);
+                    }
+                    let text = if out.trim().is_empty() { err } else { out };
                     let _ = child.wait();
-                    return Ok((false, format!("命令超时（{} 秒）已终止: {}", secs, out.trim())));
+                    return Ok((false, format!("命令超时（{} 秒）已终止: {}", secs, text.trim())));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
     }
+}
+
+/// 尝试多个常见 su 路径，返回第一个可执行的
+fn find_su_path(adb: &PathBuf, serial: &str) -> Option<String> {
+    let candidates = [
+        "/data/local/tmp/su",
+        "/apex/com.android.virt/bin/su",
+        "/system/xbin/su",
+        "/system/bin/su",
+        "/su/bin/su",
+    ];
+    for path in &candidates {
+        let mut cmd = adb_cmd(adb, serial);
+        cmd.args(["shell", "test", "-x", path]);
+        if let Ok((true, _)) = run_command(&mut cmd) {
+            return Some(path.to_string());
+        }
+    }
+    None
 }
 
 /// 构造带 -s 参数的 adb 命令
@@ -383,23 +412,23 @@ async fn escalate_privileges(
             output: out,
         });
 
-        // 2. 赋予执行权限
+        // 2. 设置文件权限（LD_PRELOAD 只需可读）
         let mut chmod = adb_cmd(&adb, &serial);
-        chmod.args(["shell", "chmod 755 /data/local/tmp/preload.so"]);
+        chmod.args(["shell", "chmod 0644 /data/local/tmp/preload.so"]);
         let (ok, out) = run_command(&mut chmod)?;
         steps.push(EscalationStep {
-            name: "chmod 755".to_string(),
+            name: "chmod 0644".to_string(),
             ok,
             output: out,
         });
 
-        // 3. 通过 app_process 注入（方式 A，可能挂起，带 8 秒超时；失败不中断流程）
+        // 3. 通过 /system/bin/true 注入 preload.so（按上游 README 标准方式）
         let mut inject = adb_cmd(&adb, &serial);
         inject.args([
             "shell",
-            "LD_PRELOAD=/data/local/tmp/preload.so /system/bin/app_process /system/bin com.android.commands.am.Am",
+            "LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true",
         ]);
-        let (ok, out) = run_with_timeout(&mut inject, 8)
+        let (ok, out) = run_with_timeout(&mut inject, 30)
             .unwrap_or((false, "注入命令执行异常".to_string()));
         steps.push(EscalationStep {
             name: "LD_PRELOAD 注入".to_string(),
@@ -410,9 +439,11 @@ async fn escalate_privileges(
         // 清理临时文件
         let _ = std::fs::remove_file(&tmp_path);
 
-        // 4. 验证提权结果
+        // 4. 验证提权结果：先定位可用的 su 路径
+        let su_path = find_su_path(&adb, &serial)
+            .unwrap_or_else(|| "/data/local/tmp/su".to_string());
         let mut verify = adb_cmd(&adb, &serial);
-        verify.args(["shell", "/apex/com.android.virt/bin/su -c 'id'"]);
+        verify.args(["shell", &format!("{} -c 'id'", su_path)]);
         let (ok, out) = run_command(&mut verify)?;
         let success = ok && out.contains("uid=0(root)");
         steps.push(EscalationStep {

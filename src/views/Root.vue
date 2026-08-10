@@ -196,7 +196,7 @@ async function exportLogs() {
           <li><b>选择设备</b>：选择已连接并开启 USB 调试的设备。</li>
           <li><b>开始提权</b>：执行注入并验证提权结果。</li>
         </ol>
-        <p class="prep-tip">提示：注入命令最多等待 8 秒；成功后将以 <code>su -c 'id'</code> 输出 <code>uid=0(root)</code> 验证。</p>
+        <p class="prep-tip">提示：注入命令最多等待 30 秒；成功后将以 <code>su -c 'id'</code> 输出 <code>uid=0(root)</code> 验证。</p>
       </div>
     </n-card>
 
