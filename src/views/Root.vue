@@ -31,8 +31,11 @@ const adbChecked = ref(false);
 const adbInfo = ref<AdbCheckInfo | null>(null);
 const adbError = ref("");
 
-const deviceSelectRef = ref<InstanceType<typeof DeviceSelect> | null>(null);
-const selectedSerial = computed(() => deviceSelectRef.value?.selectedSerial ?? null);
+const selectedSerial = ref<string | null>(null);
+
+function onDeviceSelect(serial: string | null) {
+  selectedSerial.value = serial;
+}
 
 const escalating = ref(false);
 const escalateResult = ref<EscalationResult | null>(null);
@@ -227,7 +230,7 @@ async function exportLogs() {
     <n-card v-else-if="stepIndex === 2" class="step-card" :bordered="false">
       <template #header>选择设备</template>
       <div class="step-body">
-        <DeviceSelect ref="deviceSelectRef" :disabled="!adbChecked" />
+        <DeviceSelect :disabled="!adbChecked" @select="onDeviceSelect" />
         <n-alert v-if="!adbChecked" type="info" :bordered="false" class="step-tip">
           请先完成第 1 步：检查 ADB 安装。
         </n-alert>

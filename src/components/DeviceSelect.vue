@@ -12,6 +12,10 @@ const props = withDefaults(defineProps<{ disabled?: boolean }>(), {
   disabled: false,
 });
 
+const emit = defineEmits<{
+  (e: "select", serial: string | null): void;
+}>();
+
 const devices = ref<AdbDevice[]>([]);
 const selectedSerial = ref<string | null>(null);
 const loading = ref(false);
@@ -40,6 +44,7 @@ async function refreshDevices() {
     }
     if (!devices.value.find((d) => d.serial === selectedSerial.value)) {
       selectedSerial.value = devices.value.length > 0 ? devices.value[0].serial : null;
+      emit("select", selectedSerial.value);
     }
   } catch (e) {
     errorMsg.value = `${e}`;
@@ -50,6 +55,7 @@ async function refreshDevices() {
 
 function handleSelect(serial: string | null) {
   selectedSerial.value = serial;
+  emit("select", serial);
 }
 
 onMounted(() => {
