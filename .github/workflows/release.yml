@@ -108,6 +108,7 @@ jobs:
         uses: actions/setup-node@v4.1.0 # sha: 39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with:
           node-version: 20
+          cache: pnpm
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
