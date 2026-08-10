@@ -1,6 +1,6 @@
 [package]
 name = "t5m-unlock-tool"
-version = "0.1.0"
+version = "0.1.1"
 description = "Enzyme Toolbox - T5m 305 设备 ADB 工具与 Root 提权"
 authors = ["酶游明 (Enzymeym)"]
 edition = "2021"
