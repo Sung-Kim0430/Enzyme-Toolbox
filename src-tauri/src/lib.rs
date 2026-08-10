@@ -267,6 +267,13 @@ fn run_with_timeout(cmd: &mut Command, secs: u64) -> Result<(bool, String), Stri
     }
 }
 
+/// 检测设备是否安装了 KernelSU（其内核钩子可能拦截 cred 篡改型 exploit）
+fn detect_kernelsu(adb: &PathBuf, serial: &str) -> bool {
+    let mut cmd = adb_cmd(adb, serial);
+    cmd.args(["shell", "pm list packages me.weishu.kernelsu"]);
+    matches!(run_command(&mut cmd), Ok((true, out)) if out.contains("me.weishu.kernelsu"))
+}
+
 /// 尝试多个常见 su 路径，返回第一个可执行的
 fn find_su_path(adb: &PathBuf, serial: &str) -> Option<String> {
     let candidates = [
@@ -282,6 +289,18 @@ fn find_su_path(adb: &PathBuf, serial: &str) -> Option<String> {
         if let Ok((true, _)) = run_command(&mut cmd) {
             return Some(path.to_string());
         }
+    }
+    None
+}
+
+/// 轮询等待 su 可执行文件出现（子进程可能在 adb shell 被 kill 后继续运行）
+fn wait_for_su_path(adb: &PathBuf, serial: &str, max_secs: u64) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(max_secs);
+    while Instant::now() < deadline {
+        if let Some(path) = find_su_path(adb, serial) {
+            return Some(path);
+        }
+        std::thread::sleep(Duration::from_secs(2));
     }
     None
 }
@@ -398,6 +417,16 @@ async fn escalate_privileges(
         std::fs::write(&tmp_path, PRELOAD_SO)
             .map_err(|e| format!("写入临时 preload.so 失败: {}", e))?;
 
+        // 0. 检测可能干扰漏洞利用的 root 方案
+        let has_kernelsu = detect_kernelsu(&adb, &serial);
+        if has_kernelsu {
+            steps.push(EscalationStep {
+                name: "环境检查".to_string(),
+                ok: true,
+                output: "检测到 KernelSU 已安装；该漏洞利用在 cred 写入阶段可能被 KernelSU 内核钩子终止".to_string(),
+            });
+        }
+
         // 1. 推送
         let mut push = adb_cmd(&adb, &serial);
         push.args([
@@ -423,12 +452,13 @@ async fn escalate_privileges(
         });
 
         // 3. 通过 /system/bin/true 注入 preload.so（按上游 README 标准方式）
+        // popsicle 漏洞利用可能耗时较长，超时后子进程仍可能在设备端继续运行
         let mut inject = adb_cmd(&adb, &serial);
         inject.args([
             "shell",
             "LD_PRELOAD=/data/local/tmp/preload.so /system/bin/true",
         ]);
-        let (ok, out) = run_with_timeout(&mut inject, 30)
+        let (ok, out) = run_with_timeout(&mut inject, 120)
             .unwrap_or((false, "注入命令执行异常".to_string()));
         steps.push(EscalationStep {
             name: "LD_PRELOAD 注入".to_string(),
@@ -436,11 +466,12 @@ async fn escalate_privileges(
             output: out,
         });
 
-        // 清理临时文件
+        // 清理本地临时文件
         let _ = std::fs::remove_file(&tmp_path);
 
-        // 4. 验证提权结果：先定位可用的 su 路径
-        let su_path = find_su_path(&adb, &serial)
+        // 4. 验证提权结果：先等待 su daemon 就绪
+        // 注入超时后，设备端子进程可能仍在后台完成提权，轮询等待最多 30 秒
+        let su_path = wait_for_su_path(&adb, &serial, 30)
             .unwrap_or_else(|| "/data/local/tmp/su".to_string());
         let mut verify = adb_cmd(&adb, &serial);
         verify.args(["shell", &format!("{} -c 'id'", su_path)]);

@@ -196,7 +196,10 @@ async function exportLogs() {
           <li><b>选择设备</b>：选择已连接并开启 USB 调试的设备。</li>
           <li><b>开始提权</b>：执行注入并验证提权结果。</li>
         </ol>
-        <p class="prep-tip">提示：注入命令最多等待 30 秒；成功后将以 <code>su -c 'id'</code> 输出 <code>uid=0(root)</code> 验证。</p>
+        <p class="prep-tip">
+          提示：注入命令最多等待 120 秒，超时后设备端可能仍在后台完成提权；成功后将以 <code>su -c 'id'</code> 输出 <code>uid=0(root)</code> 验证。
+          若设备上已安装 KernelSU 等内核级 root 方案，该漏洞利用可能在 cred 写入阶段被内核钩子终止，建议先卸载或禁用后再试。
+        </p>
       </div>
     </n-card>
 
