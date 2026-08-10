@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           repository: Enzymeym/T5M-305-Preload
-          ref: 3684f21  # 固定到已知 commit，未来手动 bump
+          ref: 3684f21930cba9a31c0254434059fcad35d9321c  # T5M-305-Preload main @ 2026-08-10
           path: t5m-preload
           fetch-depth: 1
 
