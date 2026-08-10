@@ -13,6 +13,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# 默认最小权限：只读
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -26,23 +30,26 @@ jobs:
     name: Build preload.so (Android NDK)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    outputs:
-      sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
       - name: Checkout T5M-305-Preload
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           repository: Enzymeym/T5M-305-Preload
+          ref: 3684f21  # 固定到已知 commit，未来手动 bump
           path: t5m-preload
           fetch-depth: 1
 
-      - name: Install Android NDK r29
-        uses: nttld/android-ndk-action@v1
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@aacaf74664d0f8e1b070a865acb47ee25007386d # v1.6.0
         with:
           ndk-version: r29
+          add-to-path: false
 
       - name: Build preload.so
         working-directory: t5m-preload/source
+        env:
+          NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
         run: make preload
 
       - name: Compute SHA-256
@@ -52,8 +59,8 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
           echo "preload.so sha256: $HASH"
 
-      - name: Rename and upload preload.so
-        uses: actions/upload-artifact@v4
+      - name: Upload preload.so
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.4.0
         with:
           name: preload-so
           path: t5m-preload/source/build/bin/preload.so
@@ -75,53 +82,38 @@ jobs:
           - label: Windows x86_64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_glob: |
-              src-tauri/target/release/t5m-unlock-tool.exe
-              src-tauri/target/release/bundle/nsis/*.exe
           - label: Linux x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            artifact_glob: |
-              src-tauri/target/release/t5m-unlock-tool
-              src-tauri/target/release/bundle/deb/*.deb
-              src-tauri/target/release/bundle/appimage/*.AppImage
           - label: macOS x86_64
             runner: macos-13
             target: x86_64-apple-darwin
-            artifact_glob: |
-              src-tauri/target/release/t5m-unlock-tool
-              src-tauri/target/release/bundle/macos/*.app
-              src-tauri/target/release/bundle/dmg/*.dmg
           - label: macOS aarch64
             runner: macos-14
             target: aarch64-apple-darwin
-            artifact_glob: |
-              src-tauri/target/release/t5m-unlock-tool
-              src-tauri/target/release/bundle/macos/*.app
-              src-tauri/target/release/bundle/dmg/*.dmg
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
         with:
           version: 9
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.1.0
         with:
           node-version: 20
           cache: pnpm
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4f7d682145cef06ddee61ce5d3f6901bb4949e08 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@9d47cda7f6214e8bc9b0ea7de39b8fc9a9c0344b # v2.7.0
         with:
           workspaces: src-tauri -> target
 
@@ -140,13 +132,12 @@ jobs:
 
       # ---- 准备 preload.so ----
       - name: Download preload.so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e775e5d8a6088c91a4421 # v4.1.8
         with:
           name: preload-so
           path: src/assets/preload
 
       - name: Rename to expected filename
-        shell: bash
         run: |
           mkdir -p src/assets/preload
           mv src/assets/preload/preload.so \
@@ -166,23 +157,27 @@ jobs:
 
       # ---- 收集产物 ----
       - name: Stage bundle artifacts
-        shell: bash
+        env:
+          RUNNER_OS: ${{ runner.os }}
         run: |
           mkdir -p out
-          # 把所有匹配的文件复制到 out/，统一命名
-          shopt -s globstar nullglob 2>/dev/null || true
-          # Windows PowerShell 兼容
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            powershell -NoProfile -Command "$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force -Path out | Out-Null; Get-ChildItem -Path src-tauri/target/release -Recurse -Include *.exe,*.msi,*.dmg,*.app | Where-Object { -not $_.PSIsContainer } | Copy-Item -Destination out/ -Force"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Windows: 拷贝 .exe / .msi
+            find src-tauri/target/release -maxdepth 6 \( -name '*.exe' -o -name '*.msi' \) -type f -exec cp {} out/ \;
           else
+            # Unix: 拷贝所有 Tauri 产物
             find src-tauri/target/release -maxdepth 6 \
-              \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.app' \) \
+              \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \
+                 -o -name '*.app' -o -name '*.tar.gz' \) \
               -type f -exec cp -r {} out/ \;
+            # 未打包的裸二进制
+            [ -f src-tauri/target/release/t5m-unlock-tool ] && \
+              cp src-tauri/target/release/t5m-unlock-tool out/
           fi
           ls -la out/
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.4.0
         with:
           name: build-${{ matrix.target }}
           path: out/

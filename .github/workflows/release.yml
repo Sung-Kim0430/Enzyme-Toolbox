@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要发布的 tag（留空则使用当前 HEAD 关联的 tag）'
+        description: '要发布的 tag（留空则使用触发本 workflow 的 tag）'
         required: false
         type: string
 
@@ -17,8 +17,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# 默认最小权限：只读
 permissions:
-  contents: write   # 用于创建 Release
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,23 +35,28 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout T5M-305-Preload
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           repository: Enzymeym/T5M-305-Preload
+          ref: 3684f21
           path: t5m-preload
           fetch-depth: 1
 
-      - name: Install Android NDK r29
-        uses: nttld/android-ndk-action@v1
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@aacaf74664d0f8e1b070a865acb47ee25007386d # v1.6.0
         with:
           ndk-version: r29
+          add-to-path: false
 
       - name: Build preload.so
         working-directory: t5m-preload/source
+        env:
+          NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
         run: make preload
 
       - name: Upload preload.so
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.4.0
         with:
           name: preload-so
           path: t5m-preload/source/build/bin/preload.so
@@ -58,7 +64,7 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------
-  # 2. 平台构建矩阵（与 build.yml 保持一致）
+  # 2. 平台构建矩阵
   # ---------------------------------------------------------------
   build:
     name: Build ${{ matrix.label }}
@@ -84,26 +90,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
         with:
           version: 9
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.1.0
         with:
           node-version: 20
           cache: pnpm
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4f7d682145cef06ddee61ce5d3f6901bb4949e08 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@9d47cda7f6214e8bc9b0ea7de39b8fc9a9c0344b # v2.7.0
         with:
           workspaces: src-tauri -> target
 
@@ -120,13 +126,12 @@ jobs:
             file
 
       - name: Download preload.so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e775e5d8a6088c91a4421 # v4.1.8
         with:
           name: preload-so
           path: src/assets/preload
-        # name=preload-so 已经是文件名，需要改成项目期望的名字
-      - name: Rename preload.so
-        shell: bash
+
+      - name: Rename to expected filename
         run: |
           mkdir -p src/assets/preload
           if [ -f src/assets/preload/preload.so ]; then
@@ -147,32 +152,25 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target ${{ matrix.target }}
 
-      - name: Stage bundle artifacts (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Stage bundle artifacts
+        env:
+          RUNNER_OS: ${{ runner.os }}
         run: |
           mkdir -p out
-          find src-tauri/target/release -maxdepth 6 \
-            \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \
-               -o -name '*.app' -o -name '*.tar.gz' \) \
-            -type f -exec cp -r {} out/ \;
-          # 也复制未打包的裸二进制
-          [ -f src-tauri/target/release/t5m-unlock-tool ] && \
-            cp src-tauri/target/release/t5m-unlock-tool out/
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            find src-tauri/target/release -maxdepth 6 \( -name '*.exe' -o -name '*.msi' \) -type f -exec cp {} out/ \;
+          else
+            find src-tauri/target/release -maxdepth 6 \
+              \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \
+                 -o -name '*.app' -o -name '*.tar.gz' \) \
+              -type f -exec cp -r {} out/ \;
+            [ -f src-tauri/target/release/t5m-unlock-tool ] && \
+              cp src-tauri/target/release/t5m-unlock-tool out/
+          fi
           ls -la out/
 
-      - name: Stage bundle artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          Get-ChildItem -Path src-tauri/target/release -Recurse -Include '*.exe','*.msi' `
-            | Where-Object { -not $_.PSIsContainer } `
-            | Copy-Item -Destination out/ -Force
-          Get-ChildItem -Path out
-
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.4.0
         with:
           name: build-${{ matrix.target }}
           path: out/
@@ -187,21 +185,23 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # 只有这个 job 需要写权限
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           fetch-depth: 0
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e775e5d8a6088c91a4421 # v4.1.8
         with:
           path: artifacts
 
       - name: Flatten artifacts & compute SHA-256
         run: |
           mkdir -p release
-          # 把所有 artifact 里的文件平铺到 release/
           for d in artifacts/*/; do
             if [ -d "$d" ]; then
               find "$d" -type f -exec cp {} release/ \;
@@ -215,11 +215,25 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Parse version from tag
+      - name: Parse version from input or tag
         id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          # 自动从 tag 派生版本号（去掉前导 v）
-          TAG="${GITHUB_REF_NAME}"
+          # 优先使用手动输入的 tag，否则用触发本 workflow 的 tag
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          # 校验 tag 格式（必须以 v 开头，避免提交垃圾）
+          case "$TAG" in
+            v*) ;;
+            *)
+              echo "Error: tag '$TAG' must start with 'v' (e.g. v0.1.0)" >&2
+              exit 1
+              ;;
+          esac
           VER="${TAG#v}"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -228,6 +242,7 @@ jobs:
       - name: Generate release notes
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
           cat > release-notes.md <<EOF
           # Enzyme Toolbox v${VERSION}
@@ -251,19 +266,18 @@ jobs:
           - **Linux**: \`sudo dpkg -i *.deb\` 安装 deb；或直接赋予 AppImage 执行权限并运行
           - **macOS**: 首次启动请在「系统设置 → 隐私与安全性」中允许（未签名）。
 
-          完整文档请见 [README](https://github.com/${{ github.repository }}#readme)。
+          完整文档请见 [README](https://github.com/${REPO}#readme)。
           EOF
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@9d8c8420d4bc3d0f9bd0c50ad9a2e1e9bba4f547 # v2.0.5
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
           name: Enzyme Toolbox v${{ steps.version.outputs.version }}
           body_path: release-notes.md
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           files: |
             release/*
-          # 如果已存在同名 Release 则追加资产
           overwrite_files: true
